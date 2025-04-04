@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Organigrama</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <!-- Incluir jsPDF desde un CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+    <div class="sidebar" id="sidebar">
+        <h2>Organigramas Guardados</h2>
+        <div class="organigrama-list-container">
+            <div class="toggle-arrow toggle-arrow-organigrama-list" onclick="toggleSidebar()"></div>
+            <div class="organigrama-list" id="organigramaList"></div>
+        </div>
+        <div class="sidebar-controls">
+            <input type="text" id="organigramaNombre" placeholder="Nombre del organigrama">
+            <button onclick="crearOrganigrama()">Crear Organigrama</button>
+        </div>
+    </div>
+    <div class="main-content" id="mainContent">
+        <div class="toolbar" id="toolbar">
+            <div class="toggle-arrow toggle-arrow-toolbar" onclick="toggleToolbar()"></div>
+            <div class="controls">
+                <h3>Agregar Nodo</h3>
+                <input type="text" id="nombre" placeholder="Nombre del cargo">
+                <select id="tipoCargo">
+                    <option value="directo">Directo</option>
+                    <option value="asesoria">Asesoría</option>
+                </select>
+                <select id="padreId">
+                    <option value="">Sin padre (raíz)</option>
+                </select>
+                <button onclick="agregarNodo()">Agregar Nodo</button>
+            </div>
+            <div class="controls">
+                <h3>Editar Nodo</h3>
+                <select id="nodoEditar"></select>
+                <input type="text" id="nuevoNombre" placeholder="Nuevo nombre">
+                <button onclick="editarNodo()">Guardar Cambios</button>
+            </div>
+            <div class="controls">
+                <h3>Eliminar Nodo</h3>
+                <select id="nodoEliminar"></select>
+                <button onclick="eliminarNodo()">Eliminar Nodo</button>
+            </div>
+            <div class="controls">
+                <h3>Imprimir Organigrama</h3>
+                <button onclick="imprimirOrganigrama()">Imprimir</button>
+            </div>
+            <div class="controls">
+                <h3>Guardar en la PC</h3>
+                <select id="formatoDescarga">
+                    <option value="png">PNG</option>
+                    <option value="pdf">PDF</option>
+                </select>
+                <button onclick="guardarOrganigrama()">Guardar</button>
+            </div>
+        </div>
+        <div class="container" id="canvasContainer">
+            <canvas id="organigramaCanvas"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const { jsPDF } = window.jspdf; // Acceder a jsPDF desde el CDN
+        const canvas = document.getElementById('organigramaCanvas');
+        const ctx = canvas.getContext('2d');
+        let nodos = [];
+        let organigramas = [];
+        let organigramaActual = null;
+        const GRID_SIZE = 50;
+        let nodoSeleccionado = null;
+        const VERTICAL_OFFSET = 20;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isPanning = false;
+        let lastX = 0;
+        let lastY = 0;
+        let isSidebarVisible = true;
+        let isToolbarVisible = true;
+        const SELECTION_MARGIN = 10; // Margen adicional para la selección de nodos
+
+        // Ajustar el tamaño del canvas al contenedor
+        function resizeCanvas() {
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = canvas.parentElement.clientHeight;
+            dibujarOrganigrama();
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Cargar organigramas al inicio
+        fetch('/organigramas')
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error al cargar organigramas:', data.error);
+                    return;
+                }
+                organigramas = data;
+                actualizarListaOrganigramas();
+                if (organigramas.length > 0) {
+                    organigramaActual = organigramas[0].id;
+                    cargarNodos(organigramaActual);
+                }
+            })
+            .catch(error => console.error('Error al cargar organigramas:', error));
+
+        // Actualizar lista de organigramas con vistas previas
+        function actualizarListaOrganigramas() {
+            const organigramaList = document.getElementById('organigramaList');
+            organigramaList.innerHTML = '';
+            organigramas.forEach(org => {
+                const item = document.createElement('div');
+                item.className = 'organigrama-item';
+                item.innerHTML = `
+                    <div class="organigrama-preview">
+                        <img src="${org.preview || ''}" alt="${org.nombre}" id="preview-${org.id}">
+                        <span>${org.nombre}</span>
+                    </div>
+                    <div class="organigrama-actions">
+                        <button onclick="cargarOrganigrama(${org.id})">Cargar</button>
+                        <button onclick="editarOrganigrama(${org.id})">Editar</button>
+                        <button onclick="eliminarOrganigrama(${org.id})">Eliminar</button>
+                    </div>
+                `;
+                organigramaList.appendChild(item);
+            });
+        }
+
+        // Generar vista previa del organigrama
+        function generarVistaPrevia() {
+            return canvas.toDataURL('image/png');
+        }
+
+        // Cargar nodos de un organigrama
+        function cargarNodos(organigramaId) {
+            fetch(`/nodos/${organigramaId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error('Error al cargar nodos:', data.error);
+                        return;
+                    }
+                    nodos = data;
+                    organigramaActual = organigramaId;
+                    actualizarSelectores();
+                    dibujarOrganigrama();
+                })
+                .catch(error => console.error('Error al cargar nodos:', error));
+        }
+
+        // Crear un nuevo organigrama
+        function crearOrganigrama() {
+            const nombre = document.getElementById('organigramaNombre').value;
+            if (!nombre) {
+                alert("Por favor, ingresa un nombre para el organigrama.");
+                return;
+            }
+            fetch('/organigramas', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nombre })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error al crear organigrama:', data.error);
+                    alert('Error al crear organigrama: ' + data.error);
+                    return;
+                }
+                organigramas.push({ id: data.id, nombre: data.nombre, preview: '' });
+                nodos = [];
+                organigramaActual = data.id;
+                actualizarSelectores();
+                dibujarOrganigrama();
+                actualizarListaOrganigramas();
+            })
+            .catch(error => {
+                console.error('Error al crear organigrama:', error);
+                alert('Error al crear organigrama: ' + error.message);
+            });
+        }
+
+        // Editar un organigrama
+        function editarOrganigrama(organigramaId) {
+            const nombre = prompt("Nuevo nombre para el organigrama:", organigramas.find(o => o.id === organigramaId).nombre);
+            if (!nombre) return;
+            fetch(`/organigramas/${organigramaId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nombre })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error al editar organigrama:', data.error);
+                    alert('Error al editar organigrama: ' + data.error);
+                    return;
+                }
+                const org = organigramas.find(o => o.id === organigramaId);
+                org.nombre = nombre;
+                actualizarListaOrganigramas();
+            })
+            .catch(error => {
+                console.error('Error al editar organigrama:', error);
+                alert('Error al editar organigrama: ' + error.message);
+            });
+        }
+
+        // Eliminar un organigrama
+        function eliminarOrganigrama(organigramaId) {
+            if (!confirm("¿Estás seguro de que deseas eliminar este organigrama?")) return;
+            fetch(`/organigramas/${organigramaId}`, {
+                method: 'DELETE'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error al eliminar organigrama:', data.error);
+                    alert('Error al eliminar organigrama: ' + data.error);
+                    return;
+                }
+                organigramas = organigramas.filter(o => o.id !== organigramaId);
+                if (organigramaActual === organigramaId) {
+                    if (organigramas.length > 0) {
+                        organigramaActual = organigramas[0].id;
+                        cargarNodos(organigramaActual);
+                    } else {
+                        organigramaActual = null;
+                        nodos = [];
+                        actualizarSelectores();
+                        dibujarOrganigrama();
+                    }
+                }
+                actualizarListaOrganigramas();
+            })
+            .catch(error => {
+                console.error('Error al eliminar organigrama:', error);
+                alert('Error al eliminar organigrama: ' + error.message);
+            });
+        }
+
+        // Cargar un organigrama
+        function cargarOrganigrama(organigramaId) {
+            cargarNodos(organigramaId);
+        }
+
+        // Calcular nivel de un nodo
+        function getNivel(nodo) {
+            if (!nodo.padre_id) return 0;
+            const padre = nodos.find(n => n.id === nodo.padre_id);
+            return padre ? getNivel(padre) + 1 : 0;
+        }
+
+        // Verificar si hay colisión entre dos nodos
+        function hayColision(x, y, nodoIgnorado = null) {
+            const nodoWidth = 120;
+            const nodoHeight = 40;
+            for (let nodo of nodos) {
+                if (nodo === nodoIgnorado) continue;
+                const nodoXMin = nodo.x;
+                const nodoXMax = nodo.x + nodoWidth;
+                const nodoYMin = nodo.y;
+                const nodoYMax = nodo.y + nodoHeight;
+                if (
+                    x < nodoXMax &&
+                    x + nodoWidth > nodoXMin &&
+                    y < nodoYMax &&
+                    y + nodoHeight > nodoYMin
+                ) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Encontrar una posición libre para el nodo
+        function encontrarPosicionLibre(xInicial, yInicial, nodoIgnorado = null) {
+            let x = xInicial;
+            let y = yInicial;
+            let intentos = 0;
+            const maxIntentos = 50; // Evitar bucles infinitos
+
+            while (hayColision(x, y, nodoIgnorado) && intentos < maxIntentos) {
+                // Mover el nodo hacia la derecha en la misma fila
+                x += GRID_SIZE;
+                intentos++;
+                if (intentos % 5 === 0) {
+                    // Si no hay espacio en la fila, bajar una fila y reiniciar X
+                    x = xInicial;
+                    y += GRID_SIZE;
+                }
+            }
+
+            if (intentos >= maxIntentos) {
+                // Si no se encuentra posición libre, usar la posición inicial
+                console.warn("No se encontró una posición libre después de varios intentos.");
+                return { x: xInicial, y: yInicial };
+            }
+
+            return { x: Math.round(x / GRID_SIZE) * GRID_SIZE, y: Math.round(y / GRID_SIZE) * GRID_SIZE };
+        }
+
+        // Calcular posición del nuevo nodo en secuencia
+        function calcularPosicionNodo(padreId) {
+            let posicionInicial;
+            if (!padreId) {
+                // Nodo raíz: posicionar horizontalmente
+                const nodosRaiz = nodos.filter(n => !n.padre_id);
+                const index = nodosRaiz.length;
+                posicionInicial = {
+                    x: 50 + index * 150,
+                    y: 50
+                };
+            } else {
+                // Nodo hijo: posicionar debajo del padre, en secuencia horizontal
+                const padre = nodos.find(n => n.id === padreId);
+                const nivel = getNivel(padre) + 1;
+                const hermanos = nodos.filter(n => n.padre_id === padreId);
+                const index = hermanos.length;
+                posicionInicial = {
+                    x: padre.x + (index * 150),
+                    y: padre.y + 100
+                };
+            }
+
+            // Ajustar a la cuadrícula y verificar colisiones
+            const xAjustado = Math.round(posicionInicial.x / GRID_SIZE) * GRID_SIZE;
+            const yAjustado = Math.round(posicionInicial.y / GRID_SIZE) * GRID_SIZE;
+            return encontrarPosicionLibre(xAjustado, yAjustado);
+        }
+
+        // Colores por nivel (para el fondo de los nodos)
+        const coloresFondoNivel = [
+            '#FF6F61',  // Nivel 0 (raíz)
+            '#87CEEB',  // Nivel 1
+            '#98FB98',  // Nivel 2
+            '#FFD700',  // Nivel 3
+            '#DDA0DD'   // Nivel 4 o superior
+        ];
+
+        // Colores por nivel (para el contorno)
+        const coloresContornoNivel = [
+            '#D32F2F',  // Nivel 0
+            '#0288D1',  // Nivel 1
+            '#388E3C',  // Nivel 2
+            '#F57F17',  // Nivel 3
+            '#7B1FA2'   // Nivel 4 o superior
+        ];
+
+        // Dibujar cuadrícula y nodos (con desplazamiento)
+        function dibujarOrganigrama() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Dibujar cuadrícula con desplazamiento
+            ctx.strokeStyle = '#ddd';
+            ctx.lineWidth = 0.5;
+            for (let x = -offsetX % GRID_SIZE; x <= canvas.width; x += GRID_SIZE) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+            for (let y = -offsetY % GRID_SIZE; y <= canvas.height; y += GRID_SIZE) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+
+            // Nodos y líneas (con desplazamiento)
+            nodos.forEach(nodo => {
+                const nivel = getNivel(nodo);
+
+                // Color del fondo según el nivel
+                ctx.fillStyle = coloresFondoNivel[Math.min(nivel, coloresFondoNivel.length - 1)];
+                ctx.fillRect(nodo.x + offsetX, nodo.y + offsetY, 120, 40);
+
+                // Color del contorno (borde)
+                const colorContorno = nodo === nodoSeleccionado ? '#FFD700' : coloresContornoNivel[Math.min(nivel, coloresContornoNivel.length - 1)];
+                ctx.strokeStyle = colorContorno;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(nodo.x + offsetX, nodo.y + offsetY, 120, 40);
+
+                // Centrar el texto
+                ctx.fillStyle = 'black';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(nodo.nombre, nodo.x + offsetX + 60, nodo.y + offsetY + 20);
+
+                if (nodo.padre_id) {
+                    const padre = nodos.find(n => n.id === nodo.padre_id);
+                    if (padre) {
+                        ctx.beginPath();
+                        ctx.strokeStyle = nodo.tipo_cargo === 'directo' ? 'black' : 'gray';
+                        ctx.setLineDash(nodo.tipo_cargo === 'directo' ? [] : [5, 5]);
+
+                        ctx.moveTo(padre.x + offsetX + 60, padre.y + offsetY + 40);
+                        ctx.lineTo(padre.x + offsetX + 60, nodo.y + offsetY - VERTICAL_OFFSET);
+
+                        ctx.moveTo(padre.x + offsetX + 60, nodo.y + offsetY - VERTICAL_OFFSET);
+                        ctx.lineTo(nodo.x + offsetX + 60, nodo.y + offsetY - VERTICAL_OFFSET);
+
+                        ctx.moveTo(nodo.x + offsetX + 60, nodo.y + offsetY - VERTICAL_OFFSET);
+                        ctx.lineTo(nodo.x + offsetX + 60, nodo.y + offsetY);
+
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                    }
+                }
+            });
+
+            // Actualizar vista previa del organigrama actual
+            if (organigramaActual) {
+                const org = organigramas.find(o => o.id === organigramaActual);
+                if (org) {
+                    org.preview = generarVistaPrevia();
+                    const previewImg = document.getElementById(`preview-${organigramaActual}`);
+                    if (previewImg) previewImg.src = org.preview;
+                }
+            }
+        }
+
+        // Actualizar selectores
+        function actualizarSelectores() {
+            const padreSelect = document.getElementById('padreId');
+            const eliminarSelect = document.getElementById('nodoEliminar');
+            const editarSelect = document.getElementById('nodoEditar');
+            padreSelect.innerHTML = '<option value="">Sin padre (raíz)</option>';
+            eliminarSelect.innerHTML = '';
+            editarSelect.innerHTML = '';
+            nodos.forEach(nodo => {
+                const optionPadre = document.createElement('option');
+                optionPadre.value = nodo.id;
+                optionPadre.text = nodo.nombre;
+                padreSelect.appendChild(optionPadre);
+
+                const optionEliminar = document.createElement('option');
+                optionEliminar.value = nodo.id;
+                optionEliminar.text = nodo.nombre;
+                eliminarSelect.appendChild(optionEliminar);
+
+                const optionEditar = document.createElement('option');
+                optionEditar.value = nodo.id;
+                optionEditar.text = nodo.nombre;
+                editarSelect.appendChild(optionEditar);
+            });
+        }
+
+        // Agregar nodo
+        function agregarNodo() {
+            if (!organigramaActual) {
+                alert("Por favor, selecciona o crea un organigrama primero.");
+                return;
+            }
+            const nombre = document.getElementById('nombre').value;
+            const tipoCargo = document.getElementById('tipoCargo').value;
+            const padreId = document.getElementById('padreId').value || null;
+            if (!nombre) {
+                alert("Por favor, ingresa un nombre para el nodo.");
+                return;
+            }
+            const posicion = calcularPosicionNodo(padreId ? parseInt(padreId) : null);
+            const nuevoNodo = {
+                nombre,
+                tipo_cargo: tipoCargo,
+                padre_id: padreId ? parseInt(padreId) : null,
+                x: posicion.x,
+                y: posicion.y
+            };
+
+            fetch(`/nodos/${organigramaActual}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(nuevoNodo)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error al agregar nodo:', data.error);
+                    alert('Error al agregar nodo: ' + data.error);
+                    return;
+                }
+                nuevoNodo.id = data.id;
+                nodos.push(nuevoNodo);
+                actualizarSelectores();
+                dibujarOrganigrama();
+            })
+            .catch(error => {
+                console.error('Error al agregar nodo:', error);
+                alert('Error al agregar nodo: ' + error.message);
+            });
+        }
+
+        // Editar nodo
+        function editarNodo() {
+            const nodoId = document.getElementById('nodoEditar').value;
+            const nuevoNombre = document.getElementById('nuevoNombre').value;
+            if (!nodoId || !nuevoNombre) {
+                alert("Por favor, selecciona un nodo y escribe un nuevo nombre.");
+                return;
+            }
+
+            const nodo = nodos.find(n => n.id === parseInt(nodoId));
+            if (nodo) {
+                nodo.nombre = nuevoNombre;
+                fetch(`/nodos/${organigramaActual}/${nodoId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(nodo)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error('Error al editar nodo:', data.error);
+                        alert('Error al editar nodo: ' + data.error);
+                        return;
+                    }
+                    actualizarSelectores();
+                    dibujarOrganigrama();
+                })
+                .catch(error => {
+                    console.error('Error al editar nodo:', error);
+                    alert('Error al editar nodo: ' + error.message);
+                });
+            }
+        }
+
+        // Eliminar nodo
+        function eliminarNodo() {
+            const nodoId = document.getElementById('nodoEliminar').value;
+            if (!nodoId) {
+                alert("Por favor, selecciona un nodo para eliminar.");
+                return;
+            }
+            if (!confirm("¿Estás seguro de que deseas eliminar este nodo?")) return;
+
+            fetch(`/nodos/${organigramaActual}/${nodoId}`, {
+                method: 'DELETE'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error al eliminar nodo:', data.error);
+                    alert('Error al eliminar nodo: ' + data.error);
+                    return;
+                }
+                nodos = nodos.filter(n => n.id !== parseInt(nodoId));
+                actualizarSelectores();
+                dibujarOrganigrama();
+            })
+            .catch(error => {
+                console.error('Error al eliminar nodo:', error);
+                alert('Error al eliminar nodo: ' + error.message);
+            });
+        }
+
+        // Funcionalidad de arrastrar nodos y panning
+        let tempX = 0; // Posición temporal durante el arrastre
+        let tempY = 0;
+
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+
+            nodoSeleccionado = null;
+            let clickedOnNode = false;
+
+            for (let nodo of nodos) {
+                // Ampliar el área de selección con un margen adicional
+                const nodoXMin = nodo.x + offsetX - SELECTION_MARGIN;
+                const nodoXMax = nodo.x + offsetX + 120 + SELECTION_MARGIN;
+                const nodoYMin = nodo.y + offsetY - SELECTION_MARGIN;
+                const nodoYMax = nodo.y + offsetY + 40 + SELECTION_MARGIN;
+
+                if (clickX >= nodoXMin && clickX <= nodoXMax && clickY >= nodoYMin && clickY <= nodoYMax) {
+                    nodoSeleccionado = nodo;
+                    clickedOnNode = true;
+                    tempX = nodo.x; // Guardar posición inicial para el arrastre
+                    tempY = nodo.y;
+                    break;
+                }
+            }
+
+            if (!clickedOnNode) {
+                isPanning = true;
+                lastX = clickX;
+                lastY = clickY;
+            }
+            dibujarOrganigrama();
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+
+            if (nodoSeleccionado) {
+                // Movimiento suave sin ajustar a la cuadrícula ni verificar colisiones
+                const x = clickX - offsetX - 60;
+                const y = clickY - offsetY - 20;
+                tempX = x;
+                tempY = y;
+                nodoSeleccionado.x = tempX;
+                nodoSeleccionado.y = tempY;
+                dibujarOrganigrama();
+            } else if (isPanning) {
+                const deltaX = clickX - lastX;
+                const deltaY = clickY - lastY;
+                offsetX += deltaX;
+                offsetY += deltaY;
+                lastX = clickX;
+                lastY = clickY;
+                dibujarOrganigrama();
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            if (nodoSeleccionado) {
+                // Ajustar a la cuadrícula y verificar colisiones solo al soltar
+                const xAjustado = Math.round(tempX / GRID_SIZE) * GRID_SIZE;
+                const yAjustado = Math.round(tempY / GRID_SIZE) * GRID_SIZE;
+                const posicionAjustada = encontrarPosicionLibre(xAjustado, yAjustado, nodoSeleccionado);
+                nodoSeleccionado.x = posicionAjustada.x;
+                nodoSeleccionado.y = posicionAjustada.y;
+
+                fetch(`/nodos/${organigramaActual}/${nodoSeleccionado.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(nodoSeleccionado)
+                })
+                .then(response => response.json())
+                .catch(error => console.error('Error al actualizar nodo:', error));
+                nodoSeleccionado = null;
+            }
+            isPanning = false;
+            dibujarOrganigrama();
+        });
+
+        // Imprimir organigrama (capturar el canvas)
+        function imprimirOrganigrama() {
+            if (!organigramaActual) {
+                alert("Por favor, selecciona un organigrama para imprimir.");
+                return;
+            }
+            const dataUrl = canvas.toDataURL('image/png');
+            // Obtener el nombre del organigrama actual
+            const nombreOrganigrama = organigramas.find(o => o.id === organigramaActual)?.nombre || 'Organigrama';
+            const win = window.open('', '', 'width=800,height=600');
+            win.document.write(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Imprimir Organigrama</title>
+                    <style>
+                        body { margin: 20px; text-align: center; font-family: Arial, sans-serif; }
+                        img { max-width: 100%; height: auto; }
+                        h1 { font-size: 24px; margin-bottom: 20px; }
+                        .buttons { margin-top: 20px; }
+                        button { padding: 8px 16px; margin: 0 10px; font-size: 14px; cursor: pointer; }
+                        @media print {
+                            .buttons { display: none; } /* Ocultar botones al imprimir */
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h1>${nombreOrganigrama}</h1>
+                    <img src="${dataUrl}" alt="Organigrama">
+                    <div class="buttons">
+                        <button onclick="window.print()">Imprimir</button>
+                        <button onclick="window.close()">Cerrar</button>
+                    </div>
+                </body>
+                </html>
+            `);
+            win.document.close();
+        }
+
+        // Guardar organigrama en la PC
+        function guardarOrganigrama() {
+            if (!organigramaActual) {
+                alert("Por favor, selecciona un organigrama para guardar.");
+                return;
+            }
+
+            const formato = document.getElementById('formatoDescarga').value;
+            const nombreOrganigrama = organigramas.find(o => o.id === organigramaActual)?.nombre || 'organigrama';
+
+            if (formato === 'png') {
+                // Descargar como PNG
+                const dataUrl = canvas.toDataURL('image/png');
+                const link = document.createElement('a');
+                link.href = dataUrl;
+                link.download = `${nombreOrganigrama}.png`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } else if (formato === 'pdf') {
+                // Descargar como PDF usando jsPDF
+                const dataUrl = canvas.toDataURL('image/png');
+                const img = new Image();
+                img.src = dataUrl;
+                img.onload = () => {
+                    const pdf = new jsPDF({
+                        orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
+                        unit: 'px',
+                        format: [canvas.width, canvas.height]
+                    });
+
+                    // Añadir la imagen del canvas al PDF
+                    pdf.addImage(img, 'PNG', 0, 0, canvas.width, canvas.height);
+                    pdf.save(`${nombreOrganigrama}.pdf`);
+                };
+            }
+        }
+
+        // Evitar panning al hacer clic en nodos
+        canvas.addEventListener('click', (e) => {
+            if (!nodoSeleccionado && !isPanning) {
+                // Aquí podrías agregar funcionalidad adicional si se hace clic en la cuadrícula
+            }
+        });
+
+        // Funciones para ocultar/mostrar menús
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const mainContent = document.getElementById('mainContent');
+            const toolbar = document.getElementById('toolbar');
+            const arrow = document.querySelector('.toggle-arrow-organigrama-list');
+            isSidebarVisible = !isSidebarVisible;
+            if (isSidebarVisible) {
+                sidebar.style.left = '0';
+                mainContent.style.marginLeft = '250px';
+                toolbar.style.left = '250px';
+                toolbar.style.width = `calc(100% - 250px)`;
+                arrow.classList.remove('arrow-right');
+                arrow.classList.add('arrow-left');
+            } else {
+                sidebar.style.left = '-250px';
+                mainContent.style.marginLeft = '0';
+                toolbar.style.left = '0';
+                toolbar.style.width = '100%';
+                arrow.classList.remove('arrow-left');
+                arrow.classList.add('arrow-right');
+            }
+            resizeCanvas();
+        }
+
+        function toggleToolbar() {
+            const toolbar = document.getElementById('toolbar');
+            const canvasContainer = document.getElementById('canvasContainer');
+            const arrow = toolbar.querySelector('.toggle-arrow-toolbar');
+            isToolbarVisible = !isToolbarVisible;
+            if (isToolbarVisible) {
+                toolbar.style.top = '0';
+                canvasContainer.style.marginTop = '70px';
+                canvasContainer.style.height = 'calc(100vh - 70px)';
+                arrow.classList.remove('arrow-up');
+                arrow.classList.add('arrow-down');
+            } else {
+                toolbar.style.top = '-70px';
+                canvasContainer.style.marginTop = '0';
+                canvasContainer.style.height = '100vh';
+                arrow.classList.remove('arrow-down');
+                arrow.classList.add('arrow-up');
+            }
+            resizeCanvas();
+        }
+    </script>
+</body>
+</html>
